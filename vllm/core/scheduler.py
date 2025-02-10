@@ -1026,6 +1026,7 @@ class Scheduler:
                 self._get_num_new_uncached_and_cached_tokens(
                     seq_group, SequenceStatus.WAITING, enable_chunking,
                     budget))
+            print(num_new_tokens_uncached, num_new_tokens_cached)
             num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
 
             if not enable_chunking:
@@ -1096,6 +1097,9 @@ class Scheduler:
                     [seq.get_num_new_tokens() for seq in seq_group.get_seqs()])
                 can_schedule_kwargs['is_prefill'] = True
                 can_schedule_kwargs['max_seq_len'] = max_prefill_seq_len
+            # wuxun: here can_schedule will try to do padding for seq_len, but previous
+            # can_allocate was to check un-padded tokens, will padding has side
+            # effects on the decision made by can_allocate???
             if (num_new_tokens_uncached == 0
                     or not budget.can_schedule(**can_schedule_kwargs)):
                 break

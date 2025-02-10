@@ -22,12 +22,14 @@ __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row,
 }  // namespace
 
 template <typename scalar_t, typename token_cnts_t>
-__global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
-                                            int32_t* sorted_token_ids,
-                                            int32_t* expert_ids,
+__global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids, // [N, topK]
+                                            int32_t* sorted_token_ids, // token ids belonged to each expert
+                                            int32_t* expert_ids, // expert ids for each block
                                             int32_t* total_tokens_post_pad,
                                             int32_t num_experts,
                                             int32_t block_size, size_t numel) {
+  // numel: N * topK
+  // blockDim.x: num_experts
   const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
@@ -124,6 +126,7 @@ __global__ void moe_align_block_size_global_mem_kernel(
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
   for (int i = 0; i < num_experts; ++i) {
+    // [blockDim.x + 1, num_experts] -> tokens count for each expert in each thread
     tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
   }
 
@@ -133,12 +136,15 @@ __global__ void moe_align_block_size_global_mem_kernel(
    * assigned to expert expert_index.
    */
   for (int i = start_idx; i < numel && i < start_idx + tokens_per_thread; ++i) {
+    // [blockDim.x + 1, num_experts]
+    // here token does not refer to topk_idx[0], instead it refers to that with padded tokens
     ++tokens_cnts[index(num_experts, threadIdx.x + 1, topk_ids[i])];
   }
 
   __syncthreads();
 
   // For each expert we accumulate the token counts from the different threads.
+  // Wuxun: for the case num_experts smaller than WARP_SIZE
   if (threadIdx.x < num_experts) {
     tokens_cnts[index(num_experts, 0, threadIdx.x)] = 0;
     for (int i = 1; i <= blockDim.x; ++i) {
@@ -147,16 +153,20 @@ __global__ void moe_align_block_size_global_mem_kernel(
     }
   }
 
+  // Wuxun: tokens_cnts[blockDim.x][num_experts] stores the total number of tokens
+  //assigned to each expert
   __syncthreads();
 
   // We accumulate the token counts of all experts in thread 0.
+  // Wuxun: cusum stores start index for each expert
+  // cumsum[num_experts] stores the total number of tokens
   if (threadIdx.x == 0) {
     cumsum[0] = 0;
     for (int i = 1; i <= num_experts; ++i) {
       cumsum[i] = cumsum[i - 1] +
                   CEILDIV(tokens_cnts[index(num_experts, blockDim.x, i - 1)],
                           block_size) *
-                      block_size;
+                      block_size; // padding to block_size
     }
     *total_tokens_post_pad = cumsum[num_experts];
   }
@@ -170,6 +180,8 @@ __global__ void moe_align_block_size_global_mem_kernel(
   if (threadIdx.x < num_experts) {
     for (int i = cumsum[threadIdx.x]; i < cumsum[threadIdx.x + 1];
          i += block_size) {
+      // expert ids for each block, there might be several blocks assigned for
+      // same expert, so they should have same expert id (threadIdx.x)
       expert_ids[i / block_size] = threadIdx.x;
     }
   }
@@ -193,6 +205,7 @@ __global__ void moe_align_block_size_global_mem_kernel(
         tokens_cnts[index(num_experts, threadIdx.x, expert_id)] +
         cumsum[expert_id];
     sorted_token_ids[rank_post_pad] = i;
+    // advance token index for same expert
     ++tokens_cnts[index(num_experts, threadIdx.x, expert_id)];
   }
 }
@@ -279,6 +292,7 @@ __global__ void moe_sum_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., topk, d]
     const int d) {
+  // Wuxun: a block processes a token, topK hidden states are summed up
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     scalar_t x = 0.0;

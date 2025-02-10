@@ -206,7 +206,10 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 
 
 class DeepseekV2Attention(nn.Module):
-
+    # Wuxun: normal way to implemente MLA, it doesn't reduce KV cache size
+    # instead it increases KV cache size due to extra rope dims. Please refer
+    # upstream vllm DeepseekV2MLAttention at
+    # https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/deepseek_v2.py#L329
     def __init__(
         self,
         config: PretrainedConfig,
@@ -226,11 +229,16 @@ class DeepseekV2Attention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
+        # Wuxun: non-positional query/key projection head dim
         self.qk_nope_head_dim = qk_nope_head_dim
+        # Wuxun: rotary positional query/key projection head dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        # Wuxun: value has no rope head dim
         self.v_head_dim = v_head_dim
+        # Wuxun: low rank dim for query projection
         self.q_lora_rank = q_lora_rank
+        # Wuxun: low rank dim for key/value projection
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
@@ -262,6 +270,7 @@ class DeepseekV2Attention(nn.Module):
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
 
+        # Wuxun: down projection for key/value: [N, d] x [d, dc] -> [N, dc]
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
@@ -327,32 +336,44 @@ class DeepseekV2Attention(nn.Module):
                 q = self.q_a_proj(hidden_states)[0].unsqueeze(0)
                 q = self.q_a_layernorm(q).squeeze(0)
             else:
+                # Wuxun: [N, h_dim] x [h_dim, q_lora_rank] -> [N, q_lora_rank]
+                # C_{t}^Q
                 q = self.q_a_proj(hidden_states)[0]
                 q = self.q_a_layernorm(q)
+            # Wuxun: [N, q_lora_rank] x [q_lora_rank, n_h*(qk_nope_head_dim+qk_rope_head_dim)] -> [N, n_h, qk_nope_head_dim + qk_rope_head_dim]
             q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
                                          self.qk_head_dim)
         else:
             q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
                                                    self.qk_head_dim)
+        # Wuxun: split into two parts: non-positional and positional
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
+        # Wuxun: [N, h_dim] x [h_dim, kv_lora_rank+qk_rope_head_dim] -> [N, kv_lora_rank+qk_rope_head_dim]
+        # C_{t}^{KV} -> cached
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
         kv_a, _ = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+
+        # Wuxun: create a new axis for local head
         latent_cache = latent_cache.unsqueeze(1)
         if is_hpu:
             kv_a = self.kv_a_layernorm(kv_a.contiguous().unsqueeze(0)).squeeze(
                 0)  # w/a of SW-208144
         else:
             kv_a = self.kv_a_layernorm(kv_a.contiguous())
+        # Wuxun: [N, kv_lora_rank] x [kv_lora_rank, n_h*(qk_nope_head_dim+v_head_dim)] -> [N, n_h*(qk_nope_head_dim+v_head_dim)]
         kv = self.kv_b_proj(kv_a)[0]
+        # Wuxun: [N, n_h*(qk_nope_head_dim+v_head_dim)] -> [N, n_h, qk_nope_head_dim + v_head_dim]
         kv = kv.view(-1, self.num_local_heads,
                      self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # WUxun: k_pe [N, 1, kv_lora_rank] -> cached
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
+        # Wuxun: require KV cache more than normal MHA due to extra rope dims
         q[..., self.qk_nope_head_dim:] = q_pe
         k = torch.empty_like(q)
         k[..., :self.qk_nope_head_dim] = k_nope

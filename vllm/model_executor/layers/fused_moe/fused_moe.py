@@ -300,8 +300,8 @@ def fused_moe_kernel(
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M) # blockDim.x
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N) # blockDim.y
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -326,6 +326,8 @@ def fused_moe_kernel(
     offs_bn = (pid_n * BLOCK_SIZE_N +
                tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    # Wuxun: offs_token // top_k -> real token ids in topk_idx (removing padding)
+    # offs_token + offs_k -> load 2D tensor of a_ptr in block manner
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
@@ -587,15 +589,18 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
+    # at worst case, for each expert, there is only one valid tokens and need
+    # to pad block_size - 1 tokens
+    # but if there is a case where a expert has no valid tokens???
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
-    sorted_ids.fill_(topk_ids.numel())
+    sorted_ids.fill_(topk_ids.numel()) # [N*topK, N*topK, N*topK, ...]
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
     expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
-                             device=topk_ids.device)
+                             device=topk_ids.device) # expert index assigned to each block
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)

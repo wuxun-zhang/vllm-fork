@@ -1305,6 +1305,9 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
+        # Wuxun: if PP enabled, there will be multiple schedulers created, and each
+        # scheduler will schedule a sequence independently, this requres LLMEngine
+        # to be asynchroneous, so that step function can be called in parallel.
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
@@ -1314,6 +1317,7 @@ class LLMEngine:
         # used is always 0.
         virtual_engine = 0
 
+        breakpoint()
         # These are cached outputs from previous iterations. None if on first
         # iteration
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
@@ -1367,6 +1371,7 @@ class LLMEngine:
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
 
+            breakpoint()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -1432,6 +1437,8 @@ class LLMEngine:
 
             # Check if need to run the usual non-async path
             if not allow_async_output_proc:
+                # wuxun: this will make GPU idle and wait CPU to process the outputs
+                # using async outut processor will mitigate this issue
                 self._process_model_outputs(ctx=ctx)
 
                 # Log stats.

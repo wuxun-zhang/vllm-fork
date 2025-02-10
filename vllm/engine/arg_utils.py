@@ -1359,6 +1359,12 @@ class EngineArgs:
 
         # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
+        if self.use_padding_aware_scheduling:
+            self.use_padding_aware_scheduling = False
+            logger.warning(
+                "Padding-aware scheduling is not supported with chunked prefill"
+                "and has been disabled.")
+
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
