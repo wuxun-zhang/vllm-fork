@@ -273,6 +273,20 @@ class DeepseekDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        # v1 7B:
+        #  num_hidden_layers = 30
+        #  hidden_size = 4096
+        #  num_attention_heads = 32 (MHA)
+        #  num_key_value_heads = 32
+        #  context_length = 4096
+        # v1 67B
+        #  num_hidden_layers = 95
+        #  hidden_size = 8192
+        #  num_attention_heads =64 (GQA)
+        #  num_key_value_heads = 8
+        #  context_length = 4096
+        #
+        # how to decide num of hidden layers - PP
         self.self_attn = DeepseekAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
