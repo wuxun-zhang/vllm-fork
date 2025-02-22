@@ -38,6 +38,7 @@ class UniProcExecutor(ExecutorBase):
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+        breakpoint()
 
         self.shutdown_worker = True
 

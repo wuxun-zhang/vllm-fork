@@ -72,6 +72,9 @@ class LLMEngine:
             executor_class=executor_class,
         )
 
+        logger.info("engine core client created, LLMEngine initialization finished.")
+        breakpoint()
+
     @classmethod
     def from_engine_args(
         cls,
@@ -86,9 +89,15 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
+        breakpoint()
         if VLLM_ENABLE_V1_MULTIPROCESSING:
-            logger.debug("Enabling multiprocessing for LLMEngine.")
-            enable_multiprocessing = True
+            from vllm.platforms import current_platform
+            if current_platform.is_hpu():
+                logger.debug("Disabling multiprocessing for V1 multiprocessing on HPU.")
+                enable_multiprocessing = False
+            else:
+                logger.debug("Enabling multiprocessing for LLMEngine.")
+                enable_multiprocessing = True
 
         # Create the LLMEngine.
         return cls(vllm_config=vllm_config,

@@ -45,6 +45,7 @@ class EngineCore:
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
+        breakpoint()
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
 

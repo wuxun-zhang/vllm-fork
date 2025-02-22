@@ -421,6 +421,8 @@ class Scheduler:
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
             # sampler output for the request.
+            # Wuxun: before generating first token, request.num_tokens equals to
+            # prompt length
             assert request.num_computed_tokens <= request.num_tokens
 
             cached_encoder_input_ids = (
@@ -435,6 +437,7 @@ class Scheduler:
                         # in the decoder's KV cache.
                         self.encoder_cache_manager.free(request, input_id)
 
+            # Wuxun: starting from first token, below condition is always true
             if request.num_computed_tokens == request.num_tokens:
                 req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request

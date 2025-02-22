@@ -43,6 +43,7 @@ class EngineCoreClient(ABC):
         executor_class: Type[Executor],
     ) -> "EngineCoreClient":
 
+        breakpoint()
         # TODO: support this for debugging purposes.
         if asyncio_mode and not multiprocess_mode:
             raise NotImplementedError(

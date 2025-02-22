@@ -466,6 +466,7 @@ class Scheduler:
         # Time at previous scheduling step
         self.prev_time = 0.0
         # Did we schedule a prompt at previous step?
+        # Wuxun: schedule seq from waiting queue
         self.prev_prompt = False
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0

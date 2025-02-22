@@ -5,6 +5,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+import vllm.envs as envs
 
 from .interface import Platform, PlatformEnum, _Backend
 
@@ -29,6 +30,8 @@ class HpuPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool) -> str:
+        if use_v1:
+            return "vllm.v1.attention.backends.hpu_attn.HPUAttentionBackend"
         logger.info("Using HPUAttention backend.")
         return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
@@ -44,15 +47,22 @@ class HpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                parallel_config.worker_cls = \
-                    "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
+                if envs.VLLM_USE_V1:
+                    raise NotImplementedError("Multi-step scheduling is not"
+                                              " supported in V1.")
+                else:
+                    parallel_config.worker_cls = \
+                        "vllm.worker.multi_step_hpu_worker.MultiStepHPUWorker"
             elif vllm_config.speculative_config:
                 parallel_config.worker_cls = \
                     "vllm.spec_decode.spec_decode_worker.create_spec_worker"
                 parallel_config.sd_worker_cls = \
                     "vllm.worker.hpu_worker.HPUWorker"
             else:
-                parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
+                if envs.VLLM_USE_V1:
+                    parallel_config.worker_cls = "vllm.v1.worker.hpu_worker.HPUWorker"
+                else:
+                    parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
@@ -84,3 +94,8 @@ class HpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_hpu.PunicaWrapperHPU"
+
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        """Get the name of a device."""
+        return torch.hpu.get_device_name(device_id)
