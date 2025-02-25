@@ -689,6 +689,10 @@ class Scheduler:
 
             # NOTE(woosuk): Preemption happens only when there is no available
             # slot to keep all the sequence groups in the RUNNING state.
+            #
+            # Wuxun: check how many new blocks are required when adding a token
+            # into block table. If num of new blocks smaller than free blocks,
+            # then we can add the token into block table.
             while not self._can_append_slots(seq_group, enable_chunking):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
@@ -729,6 +733,7 @@ class Scheduler:
 
                 # Do preemption
                 if do_preempt:
+                    # Wuxun: 
                     preempted_mode = self._preempt(victim_seq_group,
                                                    blocks_to_swap_out)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
@@ -1015,10 +1020,16 @@ class Scheduler:
         waiting_queue = self.waiting
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
+        # Wuxun: passed_delay is to balance the processing of running decode req
+        # and waiting prefill req. If passed_delay is small, decode req will be
+        # frequently interrupted by prefill req, TPOT will be worse. But if
+        # passed_delay is large, prefill req will be delayed too much, TTFT or
+        # response of new req will be bad.
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
+            # WUxun: prefill phase
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
@@ -1031,6 +1042,7 @@ class Scheduler:
 
             if not enable_chunking:
                 num_prompt_tokens = waiting_seqs[0].get_len()
+                # Wuxun: if no chunked prefill, full prompt tokens should be scheduled
                 assert num_new_tokens == num_prompt_tokens
 
             prompt_limit = self._get_prompt_limit(seq_group)
@@ -1050,6 +1062,8 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
+            # Wuxun: check if there is enough gpu mem for allocating the
+            # seq_group, by checking free blocks
             can_allocate = self.block_manager.can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
@@ -1187,6 +1201,8 @@ class Scheduler:
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
         # If any requests are swapped, prioritized swapped requests.
+        # Wuxun: according to FCFS rule, we need firstly consider swapped req if
+        # there is probably free gpu mem.
         if not self.swapped:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
@@ -1736,6 +1752,7 @@ class Scheduler:
             self.last_prompt_latency = now - self.prev_time
         self.prev_time, self.prev_prompt = now, False
         # Delay scheduling prompts to let waiting queue fill up
+        # Wuxun: batch as much as possible and then maximum throughput
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])

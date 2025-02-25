@@ -173,16 +173,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert_prefix_caching_block_or_none(prev_block)
 
         # First, try to create a block that points to cached data
+        # Wuxun: not assign physical block id yet!!!
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=token_ids,
                                             block_size=self._block_size,
                                             physical_block_id=None,
                                             extra_hash=extra_hash)
+        # Wuxun: return PrefixCacheBlock with content hash computed
+        # content_hash computed based on hash of previous tokens and current
+        # assigned token ids and extra_hash
         assert block.content_hash is not None
 
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             self.metric_data.query(hit=True)
+            # Wuxun: assign cached block id to the block
             block.block_id = cached_block_id
             self._incr_refcount_cached_block(block)
             return block
@@ -202,6 +207,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
+            # Wuxun: reuse cached block if possible
             prev_block = self.allocate_immutable_block(prev_block=prev_block,
                                                        token_ids=token_ids,
                                                        device=device,
@@ -226,6 +232,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
+        # Wuxun: 
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
@@ -314,6 +321,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block = self._hashless_allocator.allocate_mutable_block(
                 prev_block=None)
             block_id = block.block_id
+            # Wuxun: move this free block from NaiveBlockAllocator.block_pool to
+            # PrefixCachingBlockAllocator.block_pool 
             self._block_pool.free_block(block)
 
             self._track_block_id(block_id, computed=False)
@@ -913,6 +922,7 @@ class PrefixCachingBlock(Block):
 
         # Previous block exists but does not yet have a hash.
         # Return no hash in this case.
+        # Wuxun: previous block is hash-less block
         if prev_block_hash == self._none_hash and not is_first_block:
             return None
 

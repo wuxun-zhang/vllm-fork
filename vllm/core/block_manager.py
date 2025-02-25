@@ -137,6 +137,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
+        # Wuxun: if prompt is too long, then never allocate blocks since this
+        # will cause frequent block eviction (evict blocks for other seq), hence
+        # poor performance.
         if (self.num_total_gpu_blocks - num_required_blocks
                 < self.watermark_blocks):
             return AllocStatus.NEVER

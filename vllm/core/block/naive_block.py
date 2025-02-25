@@ -96,6 +96,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         block_ids = []
         for i in range(num_blocks):
+            # Wuxun: always allocate new physical block id for each block
             block_ids.append(self._allocate_block_id())
 
         blocks = []
