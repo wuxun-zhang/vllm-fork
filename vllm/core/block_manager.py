@@ -224,6 +224,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
 
+            # Wuxun: this may exit processing req ealier
             num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_append_slots(
                     token_ids=block_table.get_unseen_token_ids(

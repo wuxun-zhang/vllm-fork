@@ -187,8 +187,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             self.metric_data.query(hit=True)
-            # Wuxun: assign cached block id to the block
+            # Wuxun: assign cached physical block id to the block
             block.block_id = cached_block_id
+            # Wuxun: crrrently the block is either from free blocks or evictor
+            # free blocks. If from evictor, then we need re-add it to the block_allocator
+            # free block list.
             self._incr_refcount_cached_block(block)
             return block
         self.metric_data.query(hit=False)

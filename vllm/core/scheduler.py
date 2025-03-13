@@ -639,6 +639,11 @@ class Scheduler:
         ret.preempted.clear()
         ret.swapped_out.clear()
 
+        # Wuxun: lookahead slots is for speculative decoding, for example smaller
+        # model generates 5 tokens, and larger model will execue forward for these
+        # 5 tokens at once and then check if these can be accepted, and then
+        # generate new token based on these 5 tokens. So here lookahead slot
+        # should be 5.
         ret.num_lookahead_slots = self._get_num_lookahead_slots(
             is_prefill=False, enable_chunking=enable_chunking)
 
@@ -733,7 +738,7 @@ class Scheduler:
 
                 # Do preemption
                 if do_preempt:
-                    # Wuxun: 
+                    # Wuxun:
                     preempted_mode = self._preempt(victim_seq_group,
                                                    blocks_to_swap_out)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
@@ -1324,6 +1329,7 @@ class Scheduler:
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
+        # Wuxun: preempted req will be recomputed so add to waiting queue
         self.waiting.extendleft(running_scheduled.preempted)
 
         # Update new running requests.

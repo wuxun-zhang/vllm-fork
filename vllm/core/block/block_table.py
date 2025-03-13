@@ -168,6 +168,8 @@ class BlockTable:
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
         for i, token_block in enumerate(token_blocks):
+            # Wuxun: will check if COW needed (ref counter of block <= 1)
+            # if COW happens, replace old block with new block
             self._blocks.append_token_ids(first_block_idx + i, token_block)
 
         self._num_full_slots += len(token_ids)

@@ -600,7 +600,7 @@ class FusedMoE(torch.nn.Module):
             assert num_expert_group is not None
             topk_weights, topk_ids = grouped_topk(
                 hidden_states=hidden_states,
-                gating_output=router_logits,
+                gating_output=router_logits, # [N, n_routed_experts]
                 topk=top_k,
                 renormalize=renormalize,
                 num_expert_group=num_expert_group,

@@ -955,6 +955,8 @@ def grouped_topk(hidden_states: torch.Tensor,
         scores = scores + e_score_correction_bias.unsqueeze(0)
 
     num_token = scores.shape[0]
+    # Wuxun: [N, n_group, n_experts / n_group] -> [n, n_group]
+    # topk_group should be not bigger than n_group
     group_scores = scores.view(num_token, num_expert_group,
                                -1).max(dim=-1).values  # [n, n_group]
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1,

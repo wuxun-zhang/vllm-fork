@@ -111,6 +111,7 @@ class LRUEvictor(Evictor):
 
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: float):
+        # Wuxun: same block id may add to evictor multiple times
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed)
@@ -130,6 +131,9 @@ class LRUEvictor(Evictor):
     def _cleanup(self):
         new_priority_queue: List[Tuple[float, int, int, int]] = []
 
+        # Wuxun: order by number of hashed tokens, the more hashedd tokens, the
+        # more memory occupied, so let's evict this one first. But the
+        # prerequisitite to do this, last acceess time should be the same.
         for block_id, block in self.free_table.items():
             new_priority_queue.append(
                 (block.last_accessed, -block.num_hashed_tokens, block_id,
