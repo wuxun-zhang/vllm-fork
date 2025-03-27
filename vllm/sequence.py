@@ -765,6 +765,8 @@ class SequenceGroup:
 
         # The asserts below reflect the expectations of the current system.
         if is_prefill and enable_chunking:
+            # Wuxun: it assumes that prefill computation only happens in first
+            # step (Single Prompt policy)
             assert num_lookahead_slots == num_scheduler_steps
             self.init_multi_step(num_steps=num_lookahead_slots)
         else:

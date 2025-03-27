@@ -372,6 +372,8 @@ class BlockTable:
         # token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
         # return len(token_blocks)
 
+        # Wuxun: also need append slots for those lookahead tokens. lookahead
+        # slot only used for speculative decode or chunked prefill + multi-step.
         num_token_ids = len(token_ids) + num_lookahead_slots
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)

@@ -671,6 +671,10 @@ class Scheduler:
             #   2. If a sequence is running with non-chunked prefill, then
             #      there it's a decoding sequence, and the cached tokens info is
             #      irrelevant.
+            #
+            # Wuxun: get number of uncomputed tokens. For prefill seq, it will
+            # be (total_prompt_len - num_computed_tokens). For decode seq, it
+            # just always have 1 uncomputed new token.
             num_uncached_new_tokens, _ = (
                 self._get_num_new_uncached_and_cached_tokens(
                     seq_group, SequenceStatus.RUNNING, enable_chunking,
@@ -696,9 +700,16 @@ class Scheduler:
             # slot to keep all the sequence groups in the RUNNING state.
             #
             # Wuxun: check how many new blocks are required when adding a token
-            # into block table. If num of new blocks smaller than free blocks,
-            # then we can add the token into block table.
+            # into block table. If total num of required new blocks is smaller
+            # than free blocks, then we can add the token ids into block table.
+            # Otherwise, we do not append slots and try to preempt
+            # lowest-priority runng seq.
             while not self._can_append_slots(seq_group, enable_chunking):
+                # Wuxun: if sequence group not being scheduled, update budget
+                # by substracting its num_uncomputed_tokens. It's only valid
+                # when budget already has scheduled num_batched_tokens for this
+                # request_id.
+                # When this will happen????
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
                 num_running_seqs = seq_group.get_max_num_running_seqs()
@@ -738,7 +749,9 @@ class Scheduler:
 
                 # Do preemption
                 if do_preempt:
-                    # Wuxun:
+                    # Wuxun: decide which preempt mode to be used based on
+                    # how many sequences in this sequence group (beam search
+                    # or parallel sampling)
                     preempted_mode = self._preempt(victim_seq_group,
                                                    blocks_to_swap_out)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
@@ -755,6 +768,8 @@ class Scheduler:
                 scheduled_seq_group: ScheduledSequenceGroup = \
                     self._scheduled_seq_group_cache[self.cache_id].get_object()
                 scheduled_seq_group.seq_group = seq_group
+                # Wuxun: add decode req and chunked prefill req into
+                # scheduled_seq_group
                 if is_prefill:
                     scheduled_seq_group.token_chunk_size = num_running_tokens
                     prefill_seq_groups.append(scheduled_seq_group)
@@ -1792,6 +1807,11 @@ class Scheduler:
                 #
                 # "lookaheads" for prefills, is introduced in support for
                 # Chunked-Prefill in Multi-Step.
+                #
+                # Wuxun: for chunked prefill, we need allocate slots for current
+                # chunk_size prompt tokens and also one slot for new generated
+                # token. num_lookahead_slots is equal to num_scheduler_steps, it
+                # means pre-allocate slots for decode tokens in rest steps
                 return self.scheduler_config.num_lookahead_slots + 1
             else:
                 return 0
@@ -1847,6 +1867,7 @@ class Scheduler:
                 num_uncached_new_tokens += 1
                 continue
 
+            # Wuxun: for prefill seq
             num_computed_tokens_seq = seq.get_num_computed_tokens()
             all_num_new_tokens_seq = seq.get_len() - num_computed_tokens_seq
             if not self.cache_config.enable_prefix_caching:

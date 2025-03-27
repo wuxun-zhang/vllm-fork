@@ -70,6 +70,9 @@ class PyNcclPipe(KVPipeBase):
         impl = self._get_device_send_recv_impl(self.group)
         self.device_send_func, self.device_recv_func = impl
         # set target rank
+        # Wuxun: for 1P1D case where 1 prefill instance (rank 0) and 1 decode
+        # instance (rank 1), rank 0 sends data to rank 0 while rank 1 recv data
+        # from rank 0.
         self.target_rank_for_send = (self.kv_rank + 1) % self.kv_parallel_size
         self.target_rank_for_recv = (self.kv_rank - 1) % self.kv_parallel_size
 
