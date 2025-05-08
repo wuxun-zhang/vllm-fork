@@ -1317,7 +1317,7 @@ class LLMEngine:
         # used is always 0.
         virtual_engine = 0
 
-        breakpoint()
+        # breakpoint()
         # These are cached outputs from previous iterations. None if on first
         # iteration
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
@@ -1371,7 +1371,7 @@ class LLMEngine:
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
 
-            breakpoint()
+            # breakpoint()
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,

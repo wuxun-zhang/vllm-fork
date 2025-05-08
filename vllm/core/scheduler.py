@@ -1057,7 +1057,7 @@ class Scheduler:
                 self._get_num_new_uncached_and_cached_tokens(
                     seq_group, SequenceStatus.WAITING, enable_chunking,
                     budget))
-            print(num_new_tokens_uncached, num_new_tokens_cached)
+            # print(num_new_tokens_uncached, num_new_tokens_cached)
             num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
 
             if not enable_chunking:

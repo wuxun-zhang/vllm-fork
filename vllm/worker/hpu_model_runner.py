@@ -997,6 +997,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         lora_prompt_mapping: List[List[int]] = []
         lora_requests: Set[LoRARequest] = set()
 
+        breakpoint()
+
         seq_lens: List[int] = []
         context_lens: List[int] = []
         query_lens: List[int] = []
@@ -1024,6 +1026,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     "chunked prefill cannot be used with prefix caching "
                     "now.")
 
+            # Wuxun: tokens processed per seq
             token_chunk_size = seq_group_metadata.token_chunk_size
             seq_data = seq_group_metadata.seq_data[seq_id]
             context_len = seq_data.get_num_computed_tokens()
@@ -1082,6 +1085,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     multi_modal_placeholder_maps[modality].extend(
                         placeholder_map)
 
+            # Wuxun: warmup case
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
@@ -1090,6 +1094,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
             # Compute the slot mapping.
             slot_mapping.append([])
+            # Wuxun: block table -> allocated block ids for this seq
             block_table = seq_group_metadata.block_tables[seq_id]
 
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
@@ -1110,6 +1115,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 # For encoder-only models, the block_table is None,
                 # and there is no need to initialize the slot_mapping.
                 if block_table is not None:
+                    # Wuxun: decide which block id the i-th token is assigned 
                     block_number = block_table[i // self.block_size]
                     block_offset = i % self.block_size
                     slot = block_number * self.block_size + block_offset
@@ -1120,6 +1126,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         assert max_query_len > 0
 
+        # Wuxun: get maximum prompt length
         max_prompt_len = max(
             self.bucketing_ctx.get_padded_prompt_seq_len(max_query_len),
             self.block_size)
@@ -1139,6 +1146,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 (max_prompt_len if seq_group_metadata.sampling_params and
                  seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
+        # Wuxun: prefix caching enabled
         if any(context_lens):
             assert not self.scheduler_config.chunked_prefill_enabled
             # prefix caching
@@ -1161,6 +1169,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         else:
             prefix_block_list_tensor = None
 
+        # Wuxun: pad prmopt token to max prompt len
         input_tokens_tensor = make_tensor_with_pad(input_tokens,
                                                    max_len=max_prompt_len,
                                                    pad=0,
@@ -1178,6 +1187,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                             pad=_PAD_SLOT_ID,
                                             dtype=torch.long,
                                             device='cpu')
+        # Wuxun: current seq len for each seq
         seq_lens_tensor = torch.tensor(seq_lens,
                                        dtype=torch.long,
                                        device='cpu')
@@ -1194,10 +1204,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         # Note: num_prefill_tokens is calculated using the length of
         # input_tokens after padding.
+        # Wuxun: total prefill tokens
         num_prefill_tokens = input_tokens_tensor.numel()
         if prefix_block_list_tensor is not None:
             prefix_block_list_tensor = prefix_block_list_tensor.to(
                 self.device, non_blocking=True)
+        # Wuxun: move to device
         input_tokens_tensor = input_tokens_tensor.to(  # type: ignore
             self.device, non_blocking=True)
         input_positions = input_positions.to(  # type: ignore
@@ -1277,6 +1289,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
+            # Wuxun: token chunk size - num tokens processed in cur step for each seq
+            # for decode it should be 1
             assert seq_group_metadata.token_chunk_size == 1
 
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -1295,9 +1309,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
+            # Wuxun: parallel sampling / beam search enabled, multiple seq
+            # generated for same req
             for seq_id in seq_ids:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 if output is None:
+                    # Wuxun: add last generated tokens to input tokens
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
 
@@ -1313,6 +1330,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 num_fully_occupied_blocks = position // self.block_size
                 block_table = block_table[:num_fully_occupied_blocks + 1]
 
+                # Wuxun: block table is empty, use dummy slots
+                # warmup stage
                 if len(block_table) == 0:
                     block_number = _PAD_BLOCK_ID
                 else:
@@ -1329,6 +1348,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 if self.sliding_window is not None:
                     sliding_window_blocks = (self.sliding_window //
                                              self.block_size)
+                    # Wuxun: when sliding windows enabled, only keep valid blocks
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
@@ -1346,6 +1366,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         num_decode_tokens = len(seq_lens)
 
+        # Wuxun: use how many slots in the last block
         last_block_usage = [
             slot[0] % self.block_size + 1 for slot in slot_mapping
         ]
@@ -1354,6 +1375,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                        for bt, lbu in zip(block_tables, last_block_usage)
                        if bt]
 
+        # Wuxun: total blocks for all participating decode req
+        # mapping from token position to block id
         block_list = flatten(block_tables)
         block_groups = flatten(block_groups)
         block_usage = flatten(block_usage)
