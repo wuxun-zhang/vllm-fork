@@ -1020,6 +1020,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
+        # Wuxun: Pinned/Paged locked memory for accelerated data transfer
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
@@ -1045,6 +1046,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # in numpy and only copy the actual input content at every iteration.
         # The shape of the cached block table will be
         # (max batch size to capture, max seq len to capture / block size).
+        # Wuxun: padding for cuda graph
         self.graph_block_tables = np.zeros(
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
@@ -1086,6 +1088,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
 
+        # WUxun: cpu offload config
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
 
@@ -1098,6 +1101,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # prepare_model_inputs() call. This clobbers the cached
         # SequenceGroupToSample objects, as we reset the cache during
         # every prepare_model_inputs() call.
+        # Wuxun: for each pipeline, separate scheduler is responsible for
+        # scheduling new batched tokens for execution.
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
@@ -1507,6 +1512,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
+            # Wuxun: memory sharing can happen accross cuda graphs
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
                 # Only rank 0 should print progress bar during capture
@@ -1583,6 +1589,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     with set_forward_context(attn_metadata, self.vllm_config,
                                              virtual_engine):
                         graph_runner.capture(**capture_inputs)
+                    # Wuxun: reture global memory pool for reusing accross cuda graphs
+                    # the same memory pool can be shared as long as the conditions
+                    # can be met: 1) the execution order of CUDA graphs in replay
+                    # keeps unchanged as capture; 2) CUDA graphs will neven
+                    # executed concurrently. The same static memory address may
+                    # be reused in different cuda graphs.
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
