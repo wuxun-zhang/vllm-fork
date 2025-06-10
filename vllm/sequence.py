@@ -1218,6 +1218,8 @@ class HiddenStates(msgspec.Struct, array_like=True,
     dimension of the hidden_states tensor"""
     # Scorer hidden states. For prefill step, it is used for hidden states of
     # all tokens, whereas for decode step, it use used for last accepted tokens.
+    # Wuxun: pass hidden_states from target model to proposer model, instead of
+    # token ids (avoid tokenization, embedding, etc.)
     hidden_states: torch.Tensor
     # The sequence group metadata list. Only needed for decode step.
     seq_group_metadata_list: Optional[list[SequenceGroupMetadata]] = None

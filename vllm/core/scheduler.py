@@ -1871,6 +1871,7 @@ class Scheduler:
                 # Chunked-Prefill in Multi-Step.
                 return self.scheduler_config.num_lookahead_slots + 1
             else:
+                # Wuxun: lookahead slots are not used for prefill.
                 return 0
 
         return self.scheduler_config.num_lookahead_slots

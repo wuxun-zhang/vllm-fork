@@ -203,12 +203,15 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     num_spec_prefill_steps = \
                         draft_model_config.hf_config.n_predict
 
+            # Wuxun: for small draft model, using large TP will lead to significant
+            # communication cost.
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
 
+        # Wuxun: init spec decode sampler
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
             spec_decode_sampler = RejectionSampler()
@@ -307,7 +310,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 the draft model is a deepseek_mtp model that requires prefill
                 kv cache separately for each MTP layer.
         """
+        # Wuxun: draft model
         self.proposer_worker = proposer_worker
+        # Wuxun: verification model
         self.scorer_worker = scorer_worker
         scorer_runner = getattr(self.scorer_worker, "model_runner", None)
         self.generators = scorer_runner.get_generators(
@@ -350,6 +355,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self.proposer_worker.init_device()
 
         # NOTE(cade): load_model is not part of the WorkerBase interface.
+        # Wuxun: load model per worker/device
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
 
@@ -361,6 +367,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     dim=0,
             )
 
+            # Wuxun: load lm head weight from target model to proposer model
             self.proposer_worker.maybe_load_lm_head_weight(
                 target_lm_head_weight)
 
@@ -373,6 +380,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                                                   device_type=self.device)
 
         scorer_cls: Type[SpeculativeScorer]
+        # Wuxun: create scorer
         if self.disable_mqa_scorer:
             scorer_cls = BatchExpansionTop1Scorer
             logger.info("[Speculative Decoding] Use batch "
@@ -442,6 +450,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                          num_cpu_blocks: int) -> None:
         """Initialize the cache engine of the scorer and proposer workers.
         """
+        # Wuxun: init kv cache for draft and target model, KV cache is allocated
+        # for both draft and target model, the context length should be the same.
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
@@ -458,6 +468,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """Perform speculative decoding on the input batch.
         """
         if self.rank != self._driver_rank:
+            # Wuxun: trigger non-driver rank processing function and blocked
+            # by braocast_tensor_dict to wait for driver rank sending data.
+            # after recived data, it will process the data and return the result.
             self._run_non_driver_rank()
             return []
 
@@ -471,8 +484,13 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             return []
 
         self._track_finished_requests(execute_model_req)
+        # Wuxun: disable spec decoding if queueing seqs is too many, spec decode
+        # is for next token latency optimization by reducing scheduling overhead
+        # and generating more than one token at a single step. When batch is too
+        # large, we should prioritize throughput.
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
+        # Wuxun: block manager needs to allocate look_ahead slots for draft tokens
         num_lookahead_slots = execute_model_req.num_lookahead_slots
         all_prompt = True
         atleast_one_prompt = False
@@ -498,6 +516,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # In any of these cases, the proposer and scorer workers
         # are called normally.
         # We expect `num_speculative_tokens` to be None for prefills.
+        # Wuxun: decide if spec decode is enabled or not
         no_spec = (num_lookahead_slots == 0 or disable_all_speculation
                    or all_zero_spec_tokens)
 
@@ -536,6 +555,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self._maybe_disable_speculative_tokens(
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
+        # Wuxun: only happen on 
         if no_spec:
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
@@ -670,6 +690,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         updated, so they cannot enable spec decode in the rest decoding.
         """
 
+        # Wuxun: for prefill, run target model firstly to generate KV cache
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
@@ -705,6 +726,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     sampler_output.prefill_hidden_states)
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
+                # Wuxun: execute prefill forward for draft model to prepare
+                # KV caches which are consistent as target model.
                 self.proposer_worker.execute_model(execute_model_req)
 
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
@@ -735,6 +758,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # In case of prefill, scorer_worker has to be run before proposer so
         # that the hidden states can be propagated to proposer when needed.
+        # Wuxun: this call is aligned with _run_no_spec to call score_worker
+        # firstly to generate KV cache and also prepare hidden states
         if data["no_spec"]:
             self.scorer_worker.execute_model()
 
@@ -780,6 +805,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         with Timer() as proposal_timer:
             # Generate proposals using draft worker.
+            # Wuxun: call proposal worker to generate draft tokens
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
 
@@ -791,6 +817,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         execute_model_req.previous_hidden_states = None
 
         with Timer() as scoring_timer:
+            # Wuxun: scoring draft tokens
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
@@ -824,6 +851,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                        scoring_timer.elapsed_time_ms,
                        verification_timer.elapsed_time_ms)
 
+        # Wuxun: get bonus token
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,
@@ -1084,6 +1112,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # Populate the data structures needed to keep track of sequences with
         # bonus tokens.
+        # Wuxun: there will be at most K+1 (K: num_speculative tokens) accpeted
+        # tokens, for those tokens not passing verification, token id will be
+        # assigned to -1, so if last token id is not -1, it means there is a
+        # bonus token generated by target model.
         self._track_sequences_with_bonus_tokens(seq_ids,
                                                 request_ids_seq_ids_mapping,
                                                 accepted_token_ids_by_step)

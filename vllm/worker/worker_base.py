@@ -391,6 +391,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         sequences are provided."""
         start_time = time.perf_counter()
 
+        # Wuxun: spec decode will also run into this to prepare model inputs in
+        # driver rank and then broadcast to non-driver ranks.
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None

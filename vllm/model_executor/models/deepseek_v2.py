@@ -635,6 +635,7 @@ class DeepseekV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                # input_ids: [BS, SEQ_LEN]
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:

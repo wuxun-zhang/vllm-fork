@@ -35,12 +35,15 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
     """
 
     def __init__(self, *args, **kwargs):
+        # Wuxun: inside create a real worker, this is a wrapper to extend spec
+        # related functionalities
         DelegateWorkerBase.__init__(self, *args, **kwargs)
         # Lazy initialization list.
         self._proposer: SpeculativeProposer
 
     def init_device(self) -> None:
         self.worker.init_device()
+        # Wuxun: create proposer for spec worker
         self._proposer = Top1Proposer(
             weakref.proxy(self),  # type: ignore[arg-type]
             self.device,

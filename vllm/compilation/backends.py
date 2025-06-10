@@ -244,6 +244,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         with self.fake_mode:
             return super().run(*fake_args)
 
+    # Wuxun: each piece will become a submodule inside root graph modules
     def call_module(self, target: torch.fx.node.Target,
                     args: Tuple[torch.fx.node.Argument,
                                 ...], kwargs: Dict[str, Any]) -> Any:
@@ -433,6 +434,8 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
+        # Wuxun: split graph module into several pieces
+        # each piece will be compiled and captured with cudagraph
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_config.splitting_ops)
 
@@ -608,6 +611,7 @@ class PiecewiseBackend:
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
+        # Wuxun: the shape is already compiled
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
             return self.compiled_graph_for_general_shape(*args)
@@ -635,9 +639,13 @@ class PiecewiseBackend:
                 self.check_for_ending_compilation()
 
         if not entry.use_cudagraph:
+            # Wuxun: torch compile but without cuda graph
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
+            # Wuxun: before cuda graph capture, need to warmup to make sure
+            # autotuning of underlying cuda kernels are done (avoid capturing
+            # unnecessary cuda kernels).
             if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
                 if self.is_first_graph:
@@ -655,6 +663,7 @@ class PiecewiseBackend:
                 logger.debug("Capturing a cudagraph for shape %s",
                              runtime_shape)
 
+            # Wuxun: starting capturing cudagraph, record input addresses
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
@@ -702,10 +711,14 @@ class PiecewiseBackend:
             new_input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
+            # Wuxun: before calling cuda graph model runner, users must make sure
+            # input tensor address is unchanged during graph replaying.
             assert new_input_addresses == entry.input_addresses, (
                 "Input addresses for cudagraphs are different during replay."
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
 
+        # Wuxun: replay the cudagraph
         entry.cudagraph.replay()
+        # Wuxun: return weak ref tensor
         return entry.output

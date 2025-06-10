@@ -38,6 +38,7 @@ class Top1Proposer(SpeculativeProposer):
     ):
         self._worker = worker
         self._device = device
+        # Wuxun: default to global max model length
         self.max_proposal_len = max_proposal_len
         self._vocab_size = vocab_size
 
@@ -76,6 +77,7 @@ class Top1Proposer(SpeculativeProposer):
                 num_lookahead_slots=proposal_len,
                 previous_hidden_states=hidden_states,
             )
+            # Wuxun: call proposer worker to get the proposals
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
@@ -130,6 +132,9 @@ class Top1Proposer(SpeculativeProposer):
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has either been disabled
             # (e.g. due to high traffic) or this is a prompt request.
+            # Wuxun: for chunked prefill case, some are in decode while others
+            # still in chunked prefill stage whose speculative tokens should be
+            # 0.
             if (seq_group_metadata.is_prompt
                     or seq_group_metadata.num_speculative_tokens == 0):
                 proposal_lens.append(0)
