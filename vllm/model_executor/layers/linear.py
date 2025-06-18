@@ -127,6 +127,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
+        # Wuxun: create weight param
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
@@ -216,6 +217,7 @@ class ReplicatedLinear(LinearBase):
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
+        # Wuxun: create full weights for each device
         self.quant_method.create_weights(self,
                                          self.input_size, [self.output_size],
                                          self.input_size,
@@ -240,6 +242,7 @@ class ReplicatedLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param.size() == loaded_weight.size()
+        # Wuxun: load full weight in each device
         param.data.copy_(loaded_weight)
 
     def forward(self,
@@ -294,6 +297,7 @@ class ColumnParallelLinear(LinearBase):
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = input_size
+        # Wuxun: output size per tp device
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
         # If QKV or MergedColumn, use output size of each partition.
@@ -313,6 +317,7 @@ class ColumnParallelLinear(LinearBase):
             output_sizes = [output_size]
 
         assert self.quant_method is not None
+        # Wuxun: create weights for each device and attach weight loader
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -363,6 +368,7 @@ class ColumnParallelLinear(LinearBase):
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_rank * shard_size
+            # Wuxun: locate weight shard based on tp rank
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
 
@@ -659,6 +665,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             weight_block_size = self.quant_method.quant_config.weight_block_size
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
+            # Wuxun: for block quant, each [n, m] block has one scale, hence
+            # need to adjust shard offset and shard size
             shard_offset = (
                 (sum(self.output_sizes[:loaded_shard_id]) + block_n - 1) //
                 block_n) // tp_size
@@ -1048,8 +1056,10 @@ class RowParallelLinear(LinearBase):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         # Divide the weight matrix along the first dimension.
+        # Wuxun: should be second dimension
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
+        # Wuxun: split input size per tp device
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]

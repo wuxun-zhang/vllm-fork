@@ -35,6 +35,7 @@ def load_column_parallel_weight(param: torch.nn.Parameter,
                                 loaded_weight: torch.Tensor):
     tp = get_tensor_model_parallel_world_size()
     rk = get_tensor_model_parallel_rank()
+    # Wuxun: for linear, weight shape is [out_shape, in_shape]
     assert param.size(0) * tp == loaded_weight.size(0)
     s = rk * param.size(0)
     e = (rk + 1) * param.size(0)

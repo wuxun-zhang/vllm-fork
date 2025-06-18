@@ -176,6 +176,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             tp_size = get_tensor_model_parallel_world_size()
             assert self.quant_config.weight_block_size is not None
+            # Wuxun: block quant configs, [out_dim, in_dim]
             block_n, block_k = (
                 self.quant_config.weight_block_size[0],
                 self.quant_config.weight_block_size[1],
@@ -220,10 +221,16 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
+        # Wuxun: weight loader will be called during loading model, if specified
+        # fp8 checkpoint, the weight loader will be called to load the fp8 scales
+        # as well. Otherwise, process_weights_after_loading will be called after
+        # model/weights loaded.
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
             if not self.block_quant:
                 scale = PerTensorScaleParameter(
+                    # Wuxun: per tensor quant, output partitions sizes maybe
+                    # more than 1 due to merged QKV or others.
                     data=torch.empty(len(output_partition_sizes),
                                      dtype=torch.float32),
                     weight_loader=weight_loader,
@@ -232,6 +239,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("weight_scale", scale)
             else:
                 assert self.quant_config.activation_scheme == "dynamic"
+                # Wuxun: each block has a scale
                 scale = BlockQuantScaleParameter(
                     data=torch.empty(
                         (output_size_per_partition + block_n - 1) // block_n,
@@ -260,6 +268,7 @@ class Fp8LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
+            # Wuxun: static quantization for weight
             assert self.quant_config.activation_scheme == "dynamic"
             if current_platform.is_rocm():
                 weight, weight_scale_inv, _ = \
@@ -278,6 +287,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
+            # Wuxun: non-fp8 weights loaded, now quantize it to fp8 weights
+            # dynamic quantize weights
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
 
