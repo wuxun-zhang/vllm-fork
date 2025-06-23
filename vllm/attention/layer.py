@@ -370,6 +370,7 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
+    # wuxun: blocking load cache of this layer from connector
     wait_for_kv_layer_from_connector(layer_name)
 
     forward_context: ForwardContext = get_forward_context()
@@ -379,6 +380,7 @@ def unified_attention(
     output = self.impl.forward(self, query, key, value, kv_cache,
                                attn_metadata)
 
+    # wuxun: async store kv cache for each layer
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
 

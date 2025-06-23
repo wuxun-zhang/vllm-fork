@@ -154,6 +154,7 @@ def set_forward_context(attn_metadata: Any,
         if trigger_kv_transfer:
             kv_connector = get_kv_transfer_group()
             assert isinstance(kv_connector, KVConnectorBase_V1)
+            # wuxun: wait for all saves of all layers to complete
             kv_connector.wait_for_save()
 
         _forward_context = prev_context

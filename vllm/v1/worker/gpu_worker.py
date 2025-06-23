@@ -326,6 +326,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
+    # wuxun: initialize the kv transfer agent
     ensure_kv_transfer_initialized(vllm_config)
 
 

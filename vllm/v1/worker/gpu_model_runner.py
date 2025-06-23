@@ -1088,6 +1088,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
+        # wuxun: before model forward, build connector metadata and start kv load
         with set_forward_context(attn_metadata, self.vllm_config):
             output = self.model(
                 input_ids=input_ids,
@@ -1275,6 +1276,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = draft_token_ids.tolist()
 
         # Clear KVConnector state after all KVs are generated.
+        # wuxun: reset connector metadata
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
