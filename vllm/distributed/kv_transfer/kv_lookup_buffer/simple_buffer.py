@@ -38,6 +38,7 @@ class SimpleBuffer(KVLookupBufferBase):
         data_pipe: on device (e.g. GPU)
         """
 
+        # wuxun: create dequeue buffer to store the KV cache
         self.buffer: Deque[List[torch.Tensor]] = deque()
 
         self.buffer_size = 0
@@ -118,11 +119,14 @@ class SimpleBuffer(KVLookupBufferBase):
         data_size = sum([self._get_element_size(data) for data in buffer_item])
 
         with self.buffer_cv:
+            # wuxun: buffer is full, wait for data sent to the decode instance
             if self.buffer_size + data_size > self.buffer_size_threshold:
                 # log outside the while loop to avoid this message being logged
                 # repeatedly.
                 logger.debug("KV transfer buffer is full. Handling...")
                 while self.buffer_size + data_size > self.buffer_size_threshold:
+                    # wuxun: wait for background thread to process drop_select
+                    # requests and free up the buffer space
                     self.buffer_cv.wait()
 
             self.buffer_size += data_size
@@ -137,11 +141,14 @@ class SimpleBuffer(KVLookupBufferBase):
         try:
 
             while True:
+                # wuxun：blocking recv for signal
+                # blocking current CPU thread (background thread)
                 signal = self.signal_pipe.recv_tensor()
                 if self._is_end_signal(signal):
                     logger.info("Received end signal!")
                     break
 
+                # wuxun: device recv for input tokens and roi
                 input_tokens = self.data_pipe.recv_tensor()
 
                 roi = self.data_pipe.recv_tensor()
@@ -164,16 +171,27 @@ class SimpleBuffer(KVLookupBufferBase):
                         self.buffer.rotate(-1)
                     return False
 
+                # wuxun: background thread
                 with self.buffer_cv:
                     while not is_buffer_available(tokens_roi_recver):
                         logger.debug(
                             "KV transfer buffer is not available. Waiting...")
+                        # wuxun: background thread is waiting for main thread
+                        # to add more data to the buffer
                         self.buffer_cv.wait()
                     # need to clone the tensor
                     # in case the tensor is freed before sending finishes
+                    # wuxun: found a match in the buffer, though this match is
+                    # probably a prefix match, or partial match (common prefix).
                     matched_item = self.buffer.popleft()
                     for tensor in matched_item:
+                        # Wuxun: send the tensor to the decode instance and
+                        # decrease the buffer size, so if currently producer
+                        # instance is waiting for lookup buffer has free blocks,
+                        # then decode instance
                         self._send_tensor_and_dec_size(tensor)
+                    # wuxun: notify the main thread that the buffer is available
+                    # to add new data (line130)
                     self.buffer_cv.notify()
 
         except RuntimeError as e:
@@ -195,16 +213,25 @@ class SimpleBuffer(KVLookupBufferBase):
         if isinstance(roi, torch.Tensor):
             roi = roi.clone().float()
 
+        # wuxun: consumer instance first sends token ids and roi to producer
+        # instance. This is non-blocking send.
         self.signal_pipe.send_tensor(self.normal_signal)
+        # wuxun: send input tokens and roi to producer instance
         self.data_pipe.send_tensor(input_tokens)
         self.data_pipe.send_tensor(roi)
 
+        # wuxun: first send tensor for input tokens is to tell producer that
+        # consumer instance is processing a request containing these token ids.
+        # The second send tensor is for producer instance to tell which token
+        # ids are found in the buffer.
+        # recive tensor from producer instance
         input_tokens = self.data_pipe.recv_tensor()
         roi = self.data_pipe.recv_tensor()
         if roi is not None:
             # convert from float tensor to bool tensor
             # as PyNccl does not support sending bool tensor
             roi = (roi > 0.5)
+        # wuxun: blocking recv for key, value, and hidden states
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()

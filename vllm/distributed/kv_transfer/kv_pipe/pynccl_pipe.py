@@ -53,6 +53,7 @@ class PyNcclPipe(KVPipeBase):
         self.local_rank = local_rank
         self.kv_rank = self.config.kv_rank
         self.kv_parallel_size = self.config.kv_parallel_size
+        # wuxun: which device pipe is using
         if device is None:
             self.device = self._select_device(self.config.kv_buffer_device)
         else:
@@ -60,6 +61,7 @@ class PyNcclPipe(KVPipeBase):
 
         # build distributed connection and send/recv implementation
         store_timeout = self.config.get_from_extra_config("store_timeout", 300)
+        # wuxun: for transferring metadata
         self.group = StatelessProcessGroup.create(
             host=self.config.kv_ip,
             port=self.config.kv_port + port_offset,
@@ -72,6 +74,11 @@ class PyNcclPipe(KVPipeBase):
         impl = self._get_device_send_recv_impl(self.group)
         self.device_send_func, self.device_recv_func = impl
         # set target rank
+        # Wuxun: pipe is designed to transfer tensors in different ranks
+        # P2P communication.
+        # In typical config, for PyNCCLConnector, kv_parallel_size should be 2,
+        # consumer instance has rank 1 while producer instance has rank 0.
+        # For 1P1D case only???
         self.target_rank_for_send = (self.kv_rank + 1) % self.kv_parallel_size
         self.target_rank_for_recv = (self.kv_rank - 1) % self.kv_parallel_size
 
