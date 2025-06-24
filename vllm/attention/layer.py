@@ -334,6 +334,8 @@ class MultiHeadAttention(nn.Module):
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
+    # wuxun: skip waiting for layer for V0 since V0 uses blocking loading for
+    # all layers before model forwarding 
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
 

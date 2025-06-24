@@ -137,6 +137,7 @@ class SimpleConnector(KVConnectorBase):
 
         assert self.consumer_buffer is not None, "Please initialize the "\
             "consumer buffer before calling select."
+        # wuxun: load cache from producer lookup buffer
         return self.consumer_buffer.drop_select(input_tokens, roi)
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
@@ -146,6 +147,9 @@ class SimpleConnector(KVConnectorBase):
         assert self.producer_buffer is not None, "Please initialize the "\
             "producer buffer before calling insert."
 
+        # wuxun: add to producer lookup buffer. when consumer calls drop_select,
+        # it will query producer lookup buffer if exist kv caches, if yes,
+        # transfer them to consumer lookup buffer.
         self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
 
     def send_kv_caches_and_hidden_states(
@@ -197,6 +201,7 @@ class SimpleConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
 
+            # wuxun: call connector's insert to add kv cache to lookup buffer
             self.insert(current_tokens,
                         torch.ones_like(current_tokens,
                                         dtype=bool), keys, values,

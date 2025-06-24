@@ -83,6 +83,7 @@ class PyNcclPipe(KVPipeBase):
         self.target_rank_for_recv = (self.kv_rank - 1) % self.kv_parallel_size
 
         # transportation-related variables
+        # wuxun: transport thread is used to send tensors in a non-blocking way
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.buffer_size = 0
         self.buffer_size_lock = threading.Lock()

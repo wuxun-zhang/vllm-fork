@@ -1733,6 +1733,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # we can skip prefilling on tokens that successfully received KV caches
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
+        # wuxun: blocking recv kv cache before model forwarding
+        # here expect kv cache for all layers to be ready before model forward,
+        # While in V1, loading kv cache is async and per layer-wise.
+        #
+        # Transfer before/after whole model forward - V0 design
+        #    - not interrupt with communication in atten computation (allreduce)
+        #    - easy to utilize full bandwidth due to large kv cache size
+        # Transfer per layer - V1 design
+        #    - maybe interrupt with communication in atten computation when
+        #      transferring is not finished while another layer atten is running.
         if self.need_recv_kv(model_input, kv_caches):
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
                 get_kv_transfer_group().recv_kv_caches_and_hidden_states(
@@ -1758,6 +1768,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        # wuxun: bypass model execution in case prefill kv caches are already
+        # loaded
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
@@ -1777,6 +1789,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # Sending KV cache in distributed KV cache transfer setting
         # NOTE: the send operation is non-blocking
+        # wuxun: send all layer's kv cache to decode instances if this is prefill
+        # instance
         if self.need_send_kv(model_input, kv_caches):
             get_kv_transfer_group().send_kv_caches_and_hidden_states(
                 # model_executable is used to know which layer the current
