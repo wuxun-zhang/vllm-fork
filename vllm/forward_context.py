@@ -132,8 +132,6 @@ class DPMetadata:
             assert num_experts > 0, \
                 "No expert found in the model config. Please check the model config."
 
-        # print(f"Wuxun debug>> num_tokens={num_tokens}, num_tokens_across_dp={num_tokens_across_dp}, hidden_size={hidden_size}, num_experts={num_experts}")
-
         hidden_states_across_dp = torch.empty(
             (num_tokens_across_dp, hidden_size),
             dtype=dtype,
