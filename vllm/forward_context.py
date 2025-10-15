@@ -82,18 +82,22 @@ class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     num_tokens_across_dp_cpu: torch.Tensor
 
+    hidden_states_across_dp: torch.Tensor
+    router_logits_across_dp: torch.Tensor
+    local_hidden_states: torch.Tensor
+
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
     def make(
-        parallel_config: ParallelConfig,
+        vllm_config: VllmConfig,
         num_tokens: int,
         num_tokens_across_dp_cpu: torch.Tensor,
     ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
-        assert parallel_config.data_parallel_size > 1
-        dp_rank = parallel_config.data_parallel_rank
+        assert vllm_config.parallel_config.data_parallel_size > 1
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
         batchsize = num_tokens
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
@@ -102,7 +106,50 @@ class DPMetadata:
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
-        return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
+
+        hidden_size = vllm_config.model_config.get_hidden_size()
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+        num_tokens_across_dp = num_tokens * dp_size
+
+        dtype = vllm_config.model_config.dtype
+        from vllm.platforms import current_platform
+        device = current_platform.device_type
+
+        if device == "hpu":
+            num_expert_names = [
+                "moe_num_experts",  # Dbrx
+                "num_experts",  # Jamba
+                "n_routed_experts",  # DeepSeek
+                "num_local_experts",  # Mixtral
+            ]
+            num_experts = 0
+            for name in num_expert_names:
+                num_experts = getattr(vllm_config.model_config.hf_text_config, name, 0)
+                if num_experts > 0:
+                    break
+            assert num_experts > 0, \
+                "No expert found in the model config. Please check the model config."
+
+        # print(f"Wuxun debug>> num_tokens={num_tokens}, num_tokens_across_dp={num_tokens_across_dp}, hidden_size={hidden_size}, num_experts={num_experts}")
+
+        hidden_states_across_dp = torch.empty(
+            (num_tokens_across_dp, hidden_size),
+            dtype=dtype,
+            device=device,
+        )
+        router_logits_across_dp = torch.empty(
+            (num_tokens_across_dp, num_experts),
+            dtype=dtype,
+            device=device,
+        )
+        local_num_tokens = (num_tokens // tp_size) if vllm_config.parallel_config.use_sequence_parallel_moe else num_tokens
+        local_hidden_states = torch.empty(
+            (local_num_tokens, hidden_size), dtype=dtype, device=device
+        )
+
+        return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu, hidden_states_across_dp, router_logits_across_dp, local_hidden_states)
 
     @contextmanager
     def chunked_sizes(
@@ -269,7 +316,7 @@ def set_forward_context(
     ):
         assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(
-            vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
+            vllm_config, num_tokens or 0, num_tokens_across_dp
         )
 
     forward_context = create_forward_context(
