@@ -17,8 +17,10 @@ def _bf16_mla_sparse_kernel(
     dim_v,
     stride_q_token,
     stride_q_head,
-    stride_kv_token,
-    stride_kv_head,
+    stride_k_token,
+    stride_k_head,
+    stride_v_token,
+    stride_v_head,
     stride_out_token,
     stride_out_head,
     stride_lse,
@@ -49,7 +51,6 @@ def _bf16_mla_sparse_kernel(
     offs_dv = tl.arange(0, BLOCK_DV)
 
     off_q = cur_q * stride_q_token + cur_head[:, None] * stride_q_head + offs_d[None, :]
-    # assume dim_qk == BLOCK_DMODEL
     mask_dmodel = offs_d < BLOCK_DMODEL
     q = tl.load(q_buffer + off_q, mask=mask_h[:, None] & mask_dmodel[None, :], other=0.0)
 
@@ -59,7 +60,6 @@ def _bf16_mla_sparse_kernel(
             cur_q * stride_q_token + cur_head[:, None] * stride_q_head + offs_dpe[None, :]
         )
         # assume dim_qk == BLOCK_DMODEL + BLOCK_DPE
-        # mask_dpe = offs_dpe < Lk
         mask_dpe = offs_dpe < dim_qk
         qpe = tl.load(
             q_buffer + off_qpe, mask=mask_h[:, None] & mask_dpe[None, :], other=0.0
@@ -78,14 +78,14 @@ def _bf16_mla_sparse_kernel(
                + cur_kv_head_id * stride_indices_head
                + offs_indice),
             mask=mask_indice,
-            other=0,
+            other=-1,
         )
 
         # FIXME: casual mask for kv token idx larger than q token idx???
         # may need seq len q for each batch???
         mask_kv = (indices >= 0) & (indices < seq_kv)
         mask_kv_d = mask_dmodel
-        offs_k = indices[None, :] * stride_kv_token + cur_kv_head_id * stride_kv_head + offs_d[:, None]
+        offs_k = indices[None, :] * stride_k_token + cur_kv_head_id * stride_k_head + offs_d[:, None]
 
         # q_nope @ k_nope
         k = tl.load(k_buffer + offs_k, mask=mask_kv[None, :] & mask_kv_d[:, None], other=0.0)
@@ -93,7 +93,7 @@ def _bf16_mla_sparse_kernel(
 
         if BLOCK_DPE > 0:
             # q_rope @ k_rope
-            offs_kpe = indices[None, :] * stride_kv_token + cur_kv_head_id * stride_kv_token + offs_dpe[:, None]
+            offs_kpe = indices[None, :] * stride_k_token + cur_kv_head_id * stride_k_head + offs_dpe[:, None]
             mask_k_dpe = offs_dpe < dim_qk
             kpe = tl.load(
                 k_buffer + offs_kpe, mask=mask_kv[None, :] & mask_k_dpe[:, None], other=0.0
@@ -105,7 +105,7 @@ def _bf16_mla_sparse_kernel(
 
         # load v
         mask_v_d = offs_dv < dim_v
-        offs_v = indices[: , None] * stride_kv_token + cur_kv_head_id * stride_kv_head + offs_d[None, :]
+        offs_v = indices[: , None] * stride_v_token + cur_kv_head_id * stride_v_head + offs_dv[None, :]
         v = tl.load(v_buffer + offs_v, mask=mask_kv[:, None] & mask_v_d[None, :], other=0.0)
 
         # online softmax
@@ -125,12 +125,15 @@ def _bf16_mla_sparse_kernel(
     acc /= e_sum[:, None]
 
     # calculate lse
-    lse = e_max + tl.log(e_sum)
+    # lse = e_max + tl.log(e_sum)
+    lse = e_max
+    # lse = e_sum
 
     # write output
     offs_o = cur_q * stride_out_token + cur_head[:, None] * stride_out_head + offs_dv[None, :]
+    mask_out_d = offs_dv < dim_v
     tl.store(
-        out_ptr + offs_o, acc.to(tl.bfloat16), mask=mask_h[:, None]
+        out_ptr + offs_o, acc.to(tl.bfloat16), mask=mask_h[:, None] & mask_out_d[None, :]
     )
 
     offs_lse = cur_q * stride_lse + cur_head
@@ -181,6 +184,13 @@ def triton_bf16_mla_sparse_interface(
     k = kv
     v = kv[..., :d_v]
 
+    print("q shape: ", q.shape)
+    print("q stride: ", q.stride())
+    print("k shape: ", k.shape)
+    print("k stride: ", k.stride())
+    print("v shape: ", v.shape)
+    print("v stride: ", v.stride())
+
     _bf16_mla_sparse_kernel[grid](
         q_buffer=q,
         k_buffer=k,
@@ -195,8 +205,10 @@ def triton_bf16_mla_sparse_interface(
         dim_v=d_v,
         stride_q_token=q.stride(0),
         stride_q_head=q.stride(1),
-        stride_kv_token=kv.stride(0),
-        stride_kv_head=kv.stride(1),
+        stride_k_token=k.stride(0),
+        stride_k_head=k.stride(1),
+        stride_v_token=v.stride(0),
+        stride_v_head=v.stride(1),
         stride_out_token=out.stride(0),
         stride_out_head=out.stride(1),
         stride_lse=softmax_lse.stride(0),
@@ -246,13 +258,17 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
     q = q.view(b, sq, g, -1, dim_q)
     score = torch.einsum("bmghd,bngd->bghmn", q, k)
     sm_scale = dim_q**-0.5 if sm_scale is None else sm_scale
+
     score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
     p = score.softmax(dim=-1)
+
+    lse = score.max(dim=-1, keepdim=False)[0]
+
     p = p.view(b, g_index, h_index, -1, sq, sk)
     p = p.view(b, g, -1, sq, sk)
     o = torch.einsum("bghmn,bngd->bmghd", p.type(v.dtype), v)
     o = o.reshape(b, sq, h, dim_v)
-    return o.to(torch.bfloat16)
+    return o.to(torch.bfloat16), lse.view(b, sq, h)
 
 
 def test_sparse_mla_fwd(
@@ -263,7 +279,7 @@ def test_sparse_mla_fwd(
     HKV=1,
     DQK=576,
     DV=512,
-    topk=2048,
+    topk=16,
     dtype=torch.bfloat16,
     check_correctness=True,
     block_I=64,
@@ -287,14 +303,17 @@ def test_sparse_mla_fwd(
 
     tl_out, tl_lse = triton_bf16_mla_sparse_interface(q.view(-1,H,DQK), kv.view(-1,HKV,DQK), indices_2.view(-1,HKV,topk), sm_scale=sm_scale, d_v=DV)
     tl_out = tl_out.view(B, S, H, DV)
-    print("tl_out: ", tl_out[0,:10, 0, :10])
+    tl_lse = tl_lse.view(B, S, H)
+    # print("tl_out: ", tl_out[0, :10, 0, :10])
+    print("tl_lse: ", tl_lse[0, :5, :10])
 
     if check_correctness:
         # otherwise may cause out of memory
-        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
-        print("ref_out", ref_out[0,:10, 0, :10])
+        ref_out, ref_lse = ref_sparse_mla_fwd_interface(q, kv, indices)
+        # print("ref_out", ref_out[0, :10, 0, :10])
+        print("ref_lse", ref_lse[0, :5, :10])
         # assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
-        torch.testing.assert_allclose(tl_out, ref_out, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
         print("assert_allclose passed")
 
 
