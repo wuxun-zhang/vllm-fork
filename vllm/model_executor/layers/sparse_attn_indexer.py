@@ -131,19 +131,22 @@ def sparse_attn_indexer(
                     chunk.cu_seqlen_ke,
                 )
             num_rows = logits.shape[0]
+            topk_indices = topk_indices_buffer[
+                chunk.token_start : chunk.token_end, :topk_tokens
+            ]
 
             if current_platform.is_xpu():
-                topk_indices = ops.topk_with_bounds_torch(
-                    logits, chunk.cu_seqlen_ks, chunk.cu_seqlen_ke, topk_tokens
+                ops.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
                 )
-                topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, : topk_indices.shape[-1]
-                ] = topk_indices
             else:
-                num_rows = logits.shape[0]
-                topk_indices = topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, :topk_tokens
-                ]
                 torch.ops._C.top_k_per_row_prefill(
                     logits,
                     chunk.cu_seqlen_ks,
@@ -230,17 +233,17 @@ def sparse_attn_indexer(
             )
         else:
             if current_platform.is_xpu():
-                topk_indices = ops.decode_topk_with_masking_torch(
+                ops.top_k_per_row_decode(
                     logits,
-                    batch_size,
                     next_n,
-                    topk_tokens,
-                    max_model_len,
                     decode_metadata.seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
                 )
-                topk_indices_buffer[:num_decode_tokens, :topk_tokens] = topk_indices
             else:
-                topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
                 torch.ops._C.top_k_per_row_decode(
                     logits,
                     next_n,

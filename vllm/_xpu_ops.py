@@ -343,15 +343,18 @@ class xpu_ops:
         dst_scale[:] = kv_cache_flat[scale_indices]
 
     @staticmethod
-    def topk_with_bounds_torch(
+    def top_k_per_row_prefill(
         logits: torch.Tensor,
         cu_seqlen_ks: torch.Tensor,
         cu_seqlen_ke: torch.Tensor,
+        raw_topk_indices: torch.Tensor,
+        num_rows: int,
+        stride0: int,
+        strdide1: int,
         topk_tokens: int,
     ) -> torch.Tensor:
-        topk_indices = logits.topk(min(topk_tokens, logits.shape[-1]), dim=-1)[1].to(
-            torch.int32
-        )
+        real_topk = min(topk_tokens, logits.shape[-1])
+        topk_indices = logits.topk(real_topk, dim=-1)[1].to(torch.int32)
         topk_indices -= cu_seqlen_ks[:, None]
         mask_lo = topk_indices >= 0
         mask_hi = topk_indices - (cu_seqlen_ke - cu_seqlen_ks)[:, None] < 0
@@ -359,23 +362,28 @@ class xpu_ops:
             topk_indices, False, dtype=torch.bool, device=topk_indices.device
         )
         mask = mask_lo & mask_hi
-        topk_indices = topk_indices.masked_fill(~mask, -1)
-        return topk_indices
+        topk_indices.masked_fill_(~mask, -1)
+        raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
+            topk_indices
+        )
 
     @staticmethod
-    def decode_topk_with_masking_torch(
+    def top_k_per_row_decode(
         logits: torch.Tensor,
-        batch_size: int,
         next_n: int,
-        topk_tokens: int,
-        max_model_len: int,
         seq_lens: torch.Tensor,
+        raw_topk_indices: torch.Tensor,
+        num_rows: int,
+        stride0: int,
+        stride1: int,
+        topk_tokens: int,
     ) -> torch.Tensor:
         device = logits.device
+        batch_size = seq_lens.size(0)
         # padded query len
         padded_num_tokens = batch_size * next_n
         positions = (
-            torch.arange(max_model_len, device=device)
+            torch.arange(logits.shape[-1], device=device)
             .unsqueeze(0)
             .expand(batch_size * next_n, -1)
         )
@@ -391,5 +399,6 @@ class xpu_ops:
         # that is out of range(masked already)
         # this will happen if context length is shorter than K
         topk_indices[topk_indices > index_end_pos] = -1
-
-        return topk_indices
+        raw_topk_indices[: topk_indices.shape[0], : topk_indices.shape[1]] = (
+            topk_indices
+        )
