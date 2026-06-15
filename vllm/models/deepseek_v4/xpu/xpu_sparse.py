@@ -17,6 +17,7 @@ from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    fused_inv_rope_fp8_quant,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
@@ -88,8 +89,155 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
 
+    @staticmethod
+    def _maybe_upcast_e8m0(scale: torch.Tensor) -> torch.Tensor:
+        if scale.dtype == torch.float8_e8m0fnu:
+            return scale.to(torch.float32)
+        return scale
+
+    @classmethod
+    def _reshape_wo_a_scale_to_bkn(
+        cls,
+        scale: torch.Tensor,
+        n_local_groups: int,
+        o_lora_rank: int,
+        hidden_dim: int,
+    ) -> torch.Tensor | None:
+        # oneDNN batched path accepts weight scales as [B, N] (per-channel)
+        # or [B, gK, gN] (block quant), where B is the group batch.
+        if scale.ndim == 1 and scale.numel() == n_local_groups * o_lora_rank:
+            return scale.view(n_local_groups, o_lora_rank).contiguous()
+
+        if scale.ndim == 2:
+            dim0, dim1 = scale.shape
+            # Layout A: [G * gN, gK] -> [G, gK, gN]
+            if dim0 % n_local_groups == 0:
+                g_n = dim0 // n_local_groups
+                g_k = dim1
+                if (o_lora_rank % g_n == 0) and (hidden_dim % g_k == 0):
+                    return scale.view(n_local_groups, g_n, g_k).transpose(1, 2).contiguous()
+            # Layout B: [gK, G * gN] -> [G, gK, gN]
+            if dim1 % n_local_groups == 0:
+                g_n = dim1 // n_local_groups
+                g_k = dim0
+                if (o_lora_rank % g_n == 0) and (hidden_dim % g_k == 0):
+                    return scale.view(g_k, n_local_groups, g_n).permute(1, 0, 2).contiguous()
+
+        if scale.ndim == 3 and scale.shape[0] == n_local_groups:
+            # [G, gK, gN]
+            if (hidden_dim % scale.shape[1] == 0) and (o_lora_rank % scale.shape[2] == 0):
+                return scale.contiguous()
+            # [G, gN, gK] -> [G, gK, gN]
+            if (hidden_dim % scale.shape[2] == 0) and (o_lora_rank % scale.shape[1] == 0):
+                return scale.transpose(1, 2).contiguous()
+
+        return None
+
+    @classmethod
+    def _get_cached_wo_a_fp8_bkn(
+        cls,
+        wo_a: torch.nn.Module,
+        n_local_groups: int,
+        o_lora_rank: int,
+        hidden_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not hasattr(wo_a, "weight_scale_inv"):
+            return None
+
+        weight = wo_a.weight
+        if weight.dtype not in {torch.float8_e4m3fn, torch.float8_e5m2}:
+            return None
+
+        out_features = n_local_groups * o_lora_rank
+        scale = wo_a.weight_scale_inv
+        if scale.dtype == torch.float8_e8m0fnu:
+            cached_scale = getattr(wo_a, "_dsv4_xpu_wo_a_scale_fp32", None)
+            if cached_scale is None or cached_scale.shape != scale.shape:
+                cached_scale = scale.to(torch.float32)
+                wo_a._dsv4_xpu_wo_a_scale_fp32 = cached_scale
+            scale = cached_scale
+        else:
+            scale = cls._maybe_upcast_e8m0(scale)
+        scale_ptr = scale.data_ptr()
+        cache_key = (weight.data_ptr(), scale_ptr, n_local_groups, o_lora_rank, hidden_dim)
+
+        cached_key = getattr(wo_a, "_dsv4_xpu_wo_a_fp8_key", None)
+        cached_val = getattr(wo_a, "_dsv4_xpu_wo_a_fp8_bkn", None)
+        if cached_key == cache_key and cached_val is not None:
+            return cached_val
+
+        # wo_a can be either [G*D, R] (checkpoint/original) or [R, G*D]
+        # (post-kernel canonicalized). Normalize both to [G, R, D].
+        if weight.shape == (out_features, hidden_dim):
+            weight_bkn = weight.view(n_local_groups, o_lora_rank, hidden_dim).transpose(1, 2)
+        elif weight.shape == (hidden_dim, out_features):
+            weight_bkn = weight.view(hidden_dim, n_local_groups, o_lora_rank).permute(1, 0, 2)
+        else:
+            return None
+
+        scale_bkgn = cls._reshape_wo_a_scale_to_bkn(
+            scale,
+            n_local_groups=n_local_groups,
+            o_lora_rank=o_lora_rank,
+            hidden_dim=hidden_dim,
+        )
+        if scale_bkgn is None:
+            return None
+
+        cached = (weight_bkn.contiguous(), scale_bkgn)
+        wo_a._dsv4_xpu_wo_a_fp8_key = cache_key
+        wo_a._dsv4_xpu_wo_a_fp8_bkn = cached
+        return cached
+
+    def _o_proj_xpu_fp8(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor | None:
+        if not (hasattr(torch.ops, "_xpu_C") and hasattr(torch.ops._xpu_C, "fp8_gemm")):
+            return None
+        if not hasattr(self.wo_a, "weight_scale_inv"):
+            return None
+
+        # Generate FP8 activations with per-token-per-128 scales.
+        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+            o,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            n_groups=self.n_local_groups,
+            heads_per_group=self.n_local_heads // self.n_local_groups,
+            nope_dim=self.nope_head_dim,
+            rope_dim=self.rope_head_dim,
+            tma_aligned_scales=False,
+        )
+
+        hidden_dim = o_fp8.shape[-1]
+        cached = self._get_cached_wo_a_fp8_bkn(
+            self.wo_a,
+            n_local_groups=self.n_local_groups,
+            o_lora_rank=self.o_lora_rank,
+            hidden_dim=hidden_dim,
+        )
+        if cached is None:
+            return None
+
+        wo_a_weight_bkn, wo_a_scale_bkgn = cached
+
+        # fp8_gemm batched API: A [B, M, K], W [B, K, N] -> out [B, M, N].
+        a_bmk = o_fp8.transpose(0, 1).contiguous()
+        a_scale_bmgk = o_scale.transpose(0, 1).contiguous()
+        z_gtd = torch.ops._xpu_C.fp8_gemm(
+            a_bmk,
+            wo_a_weight_bkn,
+            torch.bfloat16,
+            a_scale_bmgk,
+            wo_a_scale_bkgn,
+            None,
+        )
+        return z_gtd.transpose(0, 1).contiguous()
+
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # XPU uses BF16 reference wo_a path (same as ROCm).
+        z = self._o_proj_xpu_fp8(o, positions)
+        if z is not None:
+            return self.wo_b(z.flatten(1))
+
+        # Fallback to BF16 reference wo_a path (same as ROCm).
         from vllm.models.deepseek_v4.amd.rocm import rocm_inv_rope_einsum
 
         z = rocm_inv_rope_einsum(
